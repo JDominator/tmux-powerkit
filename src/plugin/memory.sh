@@ -48,35 +48,54 @@ get_memory_linux() {
 }
 
 get_memory_macos() {
-    local format
-    format=$(get_cached_option "@powerkit_plugin_memory_format" "$POWERKIT_PLUGIN_MEMORY_FORMAT")
-    
-    local mem_total percent mem_used
-    local free_percent
-    free_percent=$(memory_pressure 2>/dev/null | awk '/System-wide memory free percentage:/ {print $5}' | tr -d '%')
-    
-    if [[ -n "$free_percent" && "$free_percent" =~ ^[0-9]+$ ]]; then
-        percent=$((100 - free_percent))
-        mem_total=$(sysctl -n hw.memsize 2>/dev/null || echo 0)
-        mem_used=$((mem_total * percent / 100))
-    else
-        local page_size pages_used
-        page_size=$(sysctl -n hw.pagesize 2>/dev/null || echo 4096)
-        mem_total=$(sysctl -n hw.memsize 2>/dev/null || echo 0)
-        pages_used=$(vm_stat | awk '
-            /Pages active:/ {active = $3; gsub(/\./, "", active)}
-            /Pages wired down:/ {wired = $4; gsub(/\./, "", wired)}
-            END {print active + wired}
-        ')
-        mem_used=$((pages_used * page_size))
-        percent=$(( (mem_used * 100) / mem_total ))
-    fi
-    
-    if [[ "$format" == "usage" ]]; then
-        printf '%s/%s' "$(bytes_to_human "$mem_used")" "$(bytes_to_human "$mem_total")"
-    else
-        printf '%3d%%' "$percent"
-    fi
+  # Grab vm_stat output once
+  local vmstat
+  vmstat=$(vm_stat)
+
+  # Page size (usually 4096)
+  local pagesize
+  pagesize=$(printf "%s\n" "$vmstat" | awk '/page size of/ {gsub(/\./,"",$8); print $8}')
+  [ -z "$pagesize" ] && pagesize=4096
+
+  # Extract page counts, strip trailing dots
+  local free speculative filebacked
+  free=$(printf "%s\n" "$vmstat" | awk '/Pages free/ {gsub(/\./,"",$3); print $3}')
+  speculative=$(printf "%s\n" "$vmstat" | awk '/Pages speculative/ {gsub(/\./,"",$3); print $3}')
+  filebacked=$(printf "%s\n" "$vmstat" | awk '/File-backed/ {gsub(/\./,"",$3); print $3}')
+
+  [ -z "$free" ] && free=0
+  [ -z "$speculative" ] && speculative=0
+  [ -z "$filebacked" ] && filebacked=0
+
+  # Treat file-backed + speculative as "cache"
+  local cached_pages
+  cached_pages=$((speculative + filebacked))
+
+  # Total physical memory in bytes
+  local total_bytes
+  total_bytes=$(sysctl -n hw.memsize)
+
+  # Convert pages to bytes
+  local free_bytes cached_bytes used_bytes
+  free_bytes=$((free * pagesize))
+  cached_bytes=$((cached_pages * pagesize))
+  used_bytes=$((total_bytes - free_bytes - cached_bytes))
+  if [ "$used_bytes" -lt 0 ]; then
+    used_bytes=0
+  fi
+
+  # Convert to MB
+  local total_mb used_mb cached_mb
+  total_mb=$((total_bytes / 1024 / 1024))
+  used_mb=$((used_bytes / 1024 / 1024))
+  cached_mb=$((cached_bytes / 1024 / 1024))
+
+  # Percentage (use awk for float math)
+  local used_pct
+  used_pct=$(awk -v u="$used_mb" -v t="$total_mb" 'BEGIN { if (t>0) printf "%.2f", 100*u/t; else print "0.00"; }')
+
+  # printf "Mem used (excluding cache): %s%% (%d / %d MB, cache: %d MB)\n" "$used_pct" "$used_mb" "$total_mb" "$cached_mb"
+  printf "%3d%%" "$used_pct"
 }
 
 load_plugin() {

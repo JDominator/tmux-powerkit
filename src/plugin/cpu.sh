@@ -28,14 +28,17 @@ get_cpu_linux() {
 
 # macOS: iostat or ps fallback
 get_cpu_macos() {
-    local cpu=$(iostat -c "$POWERKIT_IOSTAT_COUNT" 2>/dev/null | tail -1 | \
-        awk -v b="$POWERKIT_IOSTAT_BASELINE" -v f="$POWERKIT_IOSTAT_CPU_FIELD" '{printf "%.0f", b-$f}')
-
-    if [[ -z "$cpu" || "$cpu" == "100" ]]; then
-        local cores=$(sysctl -n hw.ncpu 2>/dev/null || echo 1)
-        cpu=$(ps -axo %cpu | awk -v c="$cores" -v l="$POWERKIT_PERF_CPU_PROCESS_LIMIT" \
-            'NR>1 && NR<=l {s+=$1} END {a=s/c; if(a>100)a=100; printf "%.0f", a}')
-    fi
+  local cpu=$(top -l 1 -n 0 | awk '
+    /CPU usage/ {
+      idle = 0
+      # find the last field that looks like "number%"
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /%$/) idle = $i
+      }
+      gsub("%","",idle)
+      printf "%.2f%%\n", 100 - idle
+    }
+  ')
     printf '%s' "${cpu:-0}"
 }
 
